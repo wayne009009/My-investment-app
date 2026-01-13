@@ -6,108 +6,96 @@ import pytz
 
 st.set_page_config(page_title="全球高息股掃描儀", layout="wide")
 
-st.title("🚀 全球高息 Top 10：含除淨日與官方查證")
-st.write("自動掃描港美股清單，顯示最新股息率及官方公告連結。")
+st.title("🚀 全球高息 Top 10：即時掃描與自定義查詢")
 
-# --- 1. 擴充候選名單 (在此加入更多標的) ---
+# --- 1. 側邊欄：自定義股票查驗 (新功能) ---
+st.sidebar.header("🔍 自定義股票查驗")
+search_symbol = st.sidebar.text_input("輸入代碼 (例如 0941.HK 或 TSLA):", "").strip().upper()
+
+if search_symbol:
+    try:
+        tk_search = yf.Ticker(search_symbol)
+        s_info = tk_search.info
+        if s_info and 'currentPrice' in s_info:
+            st.sidebar.success(f"✅ 已找到: {s_info.get('shortName')}")
+            s_price = s_info.get('currentPrice')
+            s_div = s_info.get('trailingAnnualDividendRate', 0) or s_info.get('dividendRate', 0)
+            s_lot = s_info.get('sharesPerLot', 1) if ".HK" in search_symbol else 1
+            
+            if s_div > 0:
+                st.sidebar.metric("真實股息率", f"{(s_div/s_price)*100:.2f}%")
+                st.sidebar.write(f"💰 一手 ({s_lot}股) 派息: **{s_div * s_lot:.2f} {s_info.get('currency')}**")
+            else:
+                st.sidebar.warning("⚠️ 該標的目前不派發股息 (Growth Stock)。")
+        else:
+            st.sidebar.error("找不到該代碼，請檢查格式。")
+    except:
+        st.sidebar.error("抓取失敗，請稍後再試。")
+
+# --- 2. 候選名單 ---
 CANDIDATES = [
     "0005.HK", "0011.HK", "0939.HK", "1398.HK", "3988.HK", "0941.HK", "0883.HK", "0003.HK", "0066.HK", "2800.HK",
     "0001.HK", "0002.HK", "0012.HK", "0016.HK", "0388.HK", "0857.HK", "2318.HK", "2628.HK", "3968.HK",
     "SCHD", "O", "VICI", "JEPI", "JEPQ", "VIG", "VYM", "KO", "PEP", "MO", "T", "PFE", "VZ", "ABBV", "XOM"
 ]
 
-# --- 2. 數據抓取邏輯 ---
-def get_stock_data(symbols):
+# --- 3. 核心數據抓取與 Top 10 計算 ---
+def get_refined_data(symbols):
     all_data = []
-    my_bar = st.progress(0, text="正在同步全球交易所數據...")
-    
+    my_bar = st.progress(0, text="正在同步全球 Top 10 數據...")
     for i, s in enumerate(symbols):
         try:
             tk = yf.Ticker(s)
             info = tk.info
-            if info and 'currentPrice' in info:
-                # 提取股息率
-                div_yield = info.get('dividendYield', 0)
-                
-                # 提取除淨日 (從 calendar 抓取較準確)
-                ex_div_date = "N/A"
-                try:
-                    cal = tk.calendar
-                    if cal is not None and 'Dividend Date' in cal:
-                        ex_date = cal['Dividend Date']
-                        if isinstance(ex_date, (datetime.date, datetime.datetime)):
-                            ex_div_date = ex_date.strftime('%Y-%m-%d')
-                except:
-                    pass
-                
-                all_data.append({
-                    "代碼": s,
-                    "公司": info.get('shortName', s),
-                    "現價": info.get('currentPrice'),
-                    "幣種": info.get('currency'),
-                    "股息率": div_yield,
-                    "每股派息": info.get('dividendRate', 0),
-                    "除淨日": ex_div_date,
-                    "每手股數": info.get('sharesPerLot', 1) if ".HK" in s else 1,
-                    "ticker_obj": tk
-                })
-        except:
-            continue
+            if not info or 'currentPrice' not in info: continue
+            price = info.get('currentPrice')
+            actual_div_rate = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0)
+            real_yield = (actual_div_rate / price) if price > 0 else 0
+            lot_size = info.get('sharesPerLot', 1) if ".HK" in s else 1
+            
+            all_data.append({
+                "代碼": s,
+                "公司": info.get('shortName', s),
+                "現價": price,
+                "幣種": info.get('currency'),
+                "真實股息率": real_yield,
+                "每股派息": actual_div_rate,
+                "每手股數": lot_size,
+                "一手派息額": actual_div_rate * lot_size,
+                "ticker_obj": tk
+            })
+        except: continue
         my_bar.progress((i + 1) / len(symbols))
-    
     my_bar.empty()
     if not all_data: return pd.DataFrame()
-    
-    df = pd.DataFrame(all_data)
-    # 依股息率排序並取前 10
-    return df.sort_values(by="股息率", ascending=False).head(10)
+    return pd.DataFrame(all_data).sort_values(by="真實股息率", ascending=False).head(10)
 
-# 執行掃描
-top_10_df = get_stock_data(CANDIDATES)
+top_10_df = get_refined_data(CANDIDATES)
 
 if not top_10_df.empty:
-    # --- 顯示 Top 10 對比表格 ---
     st.subheader("📊 今日即時高息排名 (Top 10)")
     display_df = top_10_df.copy()
-    display_df['股息率'] = display_df['股息率'].apply(lambda x: f"{x*100:.2f}%")
-    # 將除淨日排在顯眼位置
-    cols = ["代碼", "公司", "現價", "股息率", "除淨日", "幣種"]
-    st.dataframe(display_df[cols], use_container_width=True)
+    display_df['真實股息率'] = display_df['真實股息率'].apply(lambda x: f"{x*100:.2f}%")
+    display_df['一手派息額'] = display_df.apply(lambda r: f"{r['一手派息額']:,.2f} {r['幣種']}", axis=1)
+    st.dataframe(display_df[["代碼", "公司", "現價", "真實股息率", "一手派息額", "每手股數"]], use_container_width=True)
 
-    # --- 詳細分析分頁 ---
     st.divider()
     tabs = st.tabs([f"{r['代碼']}" for _, r in top_10_df.iterrows()])
-
     for i, (idx, res) in enumerate(top_10_df.iterrows()):
         with tabs[i]:
             c1, c2 = st.columns([2, 1])
             with c1:
                 st.write(f"### {res['公司']} ({res['代碼']})")
+                st.write(f"**💰 買入一手 ({res['每手股數']}股) 年收息：{res['一手派息額']}**")
                 hist_div = res['ticker_obj'].dividends
                 if not hist_div.empty:
                     utc = pytz.UTC
                     cutoff = utc.localize(datetime.datetime.now() - datetime.timedelta(days=5*365))
-                    last_5y = hist_div[hist_div.index > cutoff]
-                    st.line_chart(last_5y)
-
+                    st.line_chart(hist_div[hist_div.index > cutoff])
             with c2:
                 st.write("**🏛️ 官方數據查證**")
-                
                 if ".HK" in res['代碼']:
-                    # 港股：披露易
                     clean_code = res['代碼'].replace('.HK','').zfill(5)
-                    url = f"https://www.hkexnews.hk/sdsearch/searchcas_c.aspx?stockcode={clean_code}"
-                    st.link_button("🔍 進入披露易 (查看最新公告)", url)
+                    st.link_button("🔍 進入披露易 (核對股息)", f"https://www.hkexnews.hk/sdsearch/searchcas_c.aspx?stockcode={clean_code}")
                 else:
-                    # 美股：SEC EDGAR 官方查詢
-                    symbol_only = res['代碼']
-                    sec_url = f"https://www.sec.gov/edgar/browse/?CIK={symbol_only}"
-                    st.link_button("🇺🇸 進入 SEC EDGAR (官方財務報告)", sec_url)
-                
-                st.divider()
-                st.write("**💰 成本計算**")
-                lot = st.number_input(f"每手股數:", value=int(res['每手股數']), key=f"lot_{res['代碼']}")
-                st.metric("預計入場費", f"{res['現價'] * lot:,.2f} {res['幣種']}")
-                st.info(f"該標的前次除淨日參考: {res['除淨日']}")
-else:
-    st.error("暫時無法抓取數據，請重整網頁。")
+                    st.link_button("🇺🇸 進入 SEC EDGAR (官方報告)", f"https://www.sec.gov/edgar/browse/?CIK={res['代碼']}")
