@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import datetime
+import pytz
 
 st.set_page_config(page_title="專業穩健投資工具", layout="wide")
 
@@ -29,8 +30,12 @@ def get_stock_metrics(symbol):
         curr = info.get('currency', 'USD')
         lot_size = info.get('sharesPerLot', 1) if ".HK" in symbol else 1
         
-        # 披露易連結 (僅限港股)
-        hkex_url = f"https://www.hkexnews.hk/sdsearch/searchcas.aspx?shareholder={symbol.replace('.HK','')}" if ".HK" in symbol else "N/A"
+        # 構建披露易精確搜索連結 (針對港股)
+        hkex_url = "N/A"
+        if ".HK" in symbol:
+            clean_code = symbol.replace('.HK','').zfill(5)
+            # 跳轉至該代碼的最新公告列表
+            hkex_url = f"https://www.hkexnews.hk/sdsearch/searchcas_c.aspx?stockcode={clean_code}"
         
         return {
             "代碼": symbol,
@@ -73,41 +78,49 @@ if results:
             
             with c1:
                 st.write(f"### {res['公司']} ({res['代碼']})")
-                # 歷史派息圖表 (選項 B)
                 st.write("**📅 過去五年派息趨勢**")
+                
+                # 獲取派息紀錄並修正時區問題 (解決截圖中的錯誤)
                 hist_div = tk_obj.dividends
                 if not hist_div.empty:
-                    last_5y = hist_div[hist_div.index > (datetime.datetime.now() - datetime.timedelta(days=5*365))]
-                    st.line_chart(last_5y)
+                    # 統一使用 UTC 時區進行比對
+                    utc = pytz.UTC
+                    cutoff_date = utc.localize(datetime.datetime.now() - datetime.timedelta(days=5*365))
+                    last_5y = hist_div[hist_div.index > cutoff_date]
                     
-                    # 預測派息月份
-                    months = last_5y.index.month.value_counts().index[:4].tolist()
-                    months_str = ", ".join([f"{m}月" for m in sorted(months)])
-                    st.success(f"💡 歷史慣常派息月份: {months_str}")
+                    if not last_5y.empty:
+                        st.line_chart(last_5y)
+                        # 預測派息月份
+                        months = last_5y.index.month.value_counts().index[:4].tolist()
+                        months_str = ", ".join([f"{m}月" for m in sorted(months)])
+                        st.success(f"💡 歷史慣常派息月份: {months_str}")
+                    else:
+                        st.write("五年內無派息紀錄。")
                 else:
                     st.write("無法取得派息歷史。")
 
             with c2:
-                # 真實收益計算 (選項 C)
                 st.write("**💰 真實年度收益估算**")
                 shares = invest_amount / res['現價']
                 gross_div = shares * res['每股派息']
                 
                 if ".HK" in res['代碼']:
-                    net_div = gross_div - 30 # 假設代收費 30 HKD
-                    tax_info = "已扣除估計代收費 $30"
+                    net_div = gross_div - 30 
+                    tax_info = "已扣除估計代收費 $30 (港幣)"
                 else:
                     net_div = gross_div * 0.7 # 美股 30% 稅
-                    tax_info = "已扣除 30% 股息代扣稅"
+                    tax_info = "已扣除 30% 股息代扣稅 (美金)"
                 
-                st.metric("預計年領現金", f"{net_div:,.2f} {res['幣種']}")
+                st.metric("預計年領現金 (未扣佣金)", f"{net_div:,.2f} {res['幣種']}")
                 st.caption(tax_info)
                 
-                # 披露易連結
+                # 披露易連結 (修正後的精確連結)
                 if res['披露易'] != "N/A":
-                    st.link_button("🔍 前往披露易查看官方公告", res['披露易'])
+                    st.link_button("🔍 點此查看披露易官方公告 (最準確資料)", res['披露易'])
                 
-                st.info("🔄 策略提示: 派息後如欲轉倉，可參考同表內 Yield 較高且派息月份接續的股票。")
+                st.info("🔄 策略提示: 派息後如欲轉倉，可參考對比表內下一季度派息的標的。")
 
 else:
-    st.error("請在左側輸入正確的股票代碼。")
+    st.error("請在左側輸入正確的代碼，並確保格式如 0005.HK 或 AAPL。")
+                
+              
