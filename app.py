@@ -13,11 +13,13 @@ ticker_input = st.sidebar.text_input("Enter Ticker (e.g., 0005.HK, 2800.HK, SCHD
 broker_fee_rate = st.sidebar.number_input("Broker Commission % (e.g., 0.03)", value=0.03, format="%.3f") / 100
 
 # Fetch Data
-@st.cache_data(ttl=3600)
 def get_data(symbol):
     try:
         ticker = yf.Ticker(symbol)
-        return ticker
+        # 我們檢查一下是否真的抓到了價格，來確認代碼有效
+        if ticker.info.get('currentPrice'):
+            return ticker
+        return None
     except:
         return None
 
