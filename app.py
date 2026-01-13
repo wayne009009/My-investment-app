@@ -11,9 +11,9 @@ st.write("集成港美股對比、派息歷史、真實收益計算及披露易�
 
 # --- 側邊欄設定 ---
 st.sidebar.header("🔍 全球股票搜尋")
-user_input = st.sidebar.text_input("輸入多個代碼 (用逗號分隔):", "0005.HK, 2800.HK, SCHD, O")
+user_input = st.sidebar.text_input("輸入多個代碼 (用逗號分隔):", "0005.HK, 0700.HK, SCHD, O")
 broker_fee_rate = st.sidebar.number_input("券商佣金 %", value=0.03, format="%.3f") / 100
-invest_amount = st.sidebar.number_input("預計投入金額 (每隻股票)", value=100000)
+invest_amount = st.sidebar.number_input("預計投入金額 (每隻股票)", value=100, step=100) * 1000 # 以千為單位
 
 tickers = [t.strip().upper() for t in user_input.split(",")]
 
@@ -28,13 +28,17 @@ def get_stock_metrics(symbol):
         div_rate = info.get('dividendRate', 0)
         div_yield = info.get('dividendYield', 0)
         curr = info.get('currency', 'USD')
-        lot_size = info.get('sharesPerLot', 1) if ".HK" in symbol else 1
         
-        # 構建披露易精確搜索連結 (針對港股)
+        # --- 修正每手股數邏輯 ---
+        # 如果 yfinance 抓不到或回傳 1 (港股通常不可能是 1)，則給予警告
+        lot_size = info.get('sharesPerLot', 1)
+        is_hk = ".HK" in symbol
+        
+        # 披露易精確跳轉：直接導向該股的「股息及權益」公告分類
         hkex_url = "N/A"
-        if ".HK" in symbol:
+        if is_hk:
             clean_code = symbol.replace('.HK','').zfill(5)
-            # 跳轉至該代碼的最新公告列表
+            # 這是披露易公告搜尋的深層連結格式
             hkex_url = f"https://www.hkexnews.hk/sdsearch/searchcas_c.aspx?stockcode={clean_code}"
         
         return {
@@ -44,9 +48,9 @@ def get_stock_metrics(symbol):
             "幣種": curr,
             "股息率": f"{div_yield*100:.2f}%",
             "每股派息": div_rate,
-            "每手股數": lot_size,
-            "最低入場費": price * lot_size,
-            "披露易": hkex_url,
+            "每手股數": int(lot_size),
+            "hkex": hkex_url,
+            "is_hk": is_hk,
             "object": tk
         }
     except:
@@ -59,13 +63,13 @@ for t in tickers:
     if data: results.append(data)
 
 if results:
-    df = pd.DataFrame(results)
-    
-    # --- 選項 A: 多股票橫向對比 ---
+    # --- 選項 A: 多股票橫久對比 ---
     st.subheader("📊 多股票橫向對比")
-    st.dataframe(df.drop(columns=['object', '披露易']), use_container_width=True)
+    display_df = pd.DataFrame(results).drop(columns=['object', 'hkex', 'is_hk'])
+    st.dataframe(display_df, use_container_width=True)
+    st.warning("⚠️ 提示：若港股『每手股數』顯示為 1，代表數據源暫無該資訊，請以披露易公告為準。")
 
-    # --- 選項 B & C: 詳細分析 ---
+    # --- 詳細分析 ---
     st.divider()
     tabs = st.tabs([f"分析: {r['代碼']}" for r in results])
     
@@ -75,52 +79,34 @@ if results:
         
         with tab:
             c1, c2 = st.columns([2, 1])
-            
             with c1:
                 st.write(f"### {res['公司']} ({res['代碼']})")
-                st.write("**📅 過去五年派息趨勢**")
-                
-                # 獲取派息紀錄並修正時區問題 (解決截圖中的錯誤)
+                # 歷史派息趨勢 (修正時區)
                 hist_div = tk_obj.dividends
                 if not hist_div.empty:
-                    # 統一使用 UTC 時區進行比對
                     utc = pytz.UTC
-                    cutoff_date = utc.localize(datetime.datetime.now() - datetime.timedelta(days=5*365))
-                    last_5y = hist_div[hist_div.index > cutoff_date]
-                    
+                    cutoff = utc.localize(datetime.datetime.now() - datetime.timedelta(days=5*365))
+                    last_5y = hist_div[hist_div.index > cutoff]
                     if not last_5y.empty:
                         st.line_chart(last_5y)
-                        # 預測派息月份
                         months = last_5y.index.month.value_counts().index[:4].tolist()
-                        months_str = ", ".join([f"{m}月" for m in sorted(months)])
-                        st.success(f"💡 歷史慣常派息月份: {months_str}")
-                    else:
-                        st.write("五年內無派息紀錄。")
-                else:
-                    st.write("無法取得派息歷史。")
+                        st.success(f"💡 歷史慣常派息月份: {', '.join([f'{m}月' for m in sorted(months)])}")
 
             with c2:
-                st.write("**💰 真實年度收益估算**")
-                shares = invest_amount / res['現價']
-                gross_div = shares * res['每股派息']
+                st.write("**💰 投資成本與收益**")
+                # 讓用戶手動校準每手股數
+                correct_lot = st.number_input(f"校正 {res['代碼']} 每手股數:", value=res['每手股數'], step=1, key=f"lot_{res['代碼']}")
+                min_entry = res['現價'] * correct_lot
+                st.metric("最低入場費", f"{min_entry:,.2f} {res['幣種']}")
                 
-                if ".HK" in res['代碼']:
-                    net_div = gross_div - 30 
-                    tax_info = "已扣除估計代收費 $30 (港幣)"
+                st.divider()
+                if res['is_hk']:
+                    st.link_button("🔗 披露易：查看最新股息公告", res['hkex'])
+                    st.caption("建議在此確認最新的『每手股數』與『除淨日』")
                 else:
-                    net_div = gross_div * 0.7 # 美股 30% 稅
-                    tax_info = "已扣除 30% 股息代扣稅 (美金)"
-                
-                st.metric("預計年領現金 (未扣佣金)", f"{net_div:,.2f} {res['幣種']}")
-                st.caption(tax_info)
-                
-                # 披露易連結 (修正後的精確連結)
-                if res['披露易'] != "N/A":
-                    st.link_button("🔍 點此查看披露易官方公告 (最準確資料)", res['披露易'])
-                
-                st.info("🔄 策略提示: 派息後如欲轉倉，可參考對比表內下一季度派息的標的。")
+                    st.write("🇺🇸 美股通常以 1 股為單位交易。")
 
 else:
-    st.error("請在左側輸入正確的代碼，並確保格式如 0005.HK 或 AAPL。")
+    st.error("請確認輸入的代碼格式正確。")
                 
               
