@@ -2,126 +2,113 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import datetime
-import pytz
+import io
 
 st.set_page_config(page_title="全球收息佈局大師", layout="wide")
 
-# --- 側邊欄設定 ---
-st.sidebar.header("🛡️ 風險與時間管理")
-min_growth_years = st.sidebar.slider("最低連續派息增長年數", 0, 10, 0)
-min_profit_only = st.sidebar.checkbox("僅顯示盈利公司", value=True)
+# --- 側邊欄：風險管理與自定義查詢 ---
+st.sidebar.header("🔍 自定義與風險設定")
+search_symbol = st.sidebar.text_input("⭐ 輸入代碼強行加入對比 (例: 0941.HK):", "").strip().upper()
+min_growth_years = st.sidebar.slider("最低連續增長年數", 0, 10, 0)
+min_profit_only = st.sidebar.checkbox("僅顯示盈利公司 (不影響自定義股票)", value=False)
 
 # --- 核心運算函式 ---
-def get_dividend_details(tk_obj):
+def get_details(tk_obj):
     divs = tk_obj.dividends
     if divs.empty: return 0, {}
-    
-    # 1. 計算連續增長年數 (按年加總)
-    yearly_divs = divs.groupby(divs.index.year).sum().sort_index(ascending=False)
+    # 連續增長計算
+    yearly = divs.groupby(divs.index.year).sum().sort_index(ascending=False)
     streak = 0
-    years = yearly_divs.index.tolist()
+    years = yearly.index.tolist()
     for i in range(len(years) - 1):
-        if yearly_divs.iloc[i] >= yearly_divs.iloc[i+1]: streak += 1
+        if yearly.iloc[i] >= yearly.iloc[i+1]: streak += 1
         else: break
-    
-    # 2. 過去 12 個月按月份分類 (製作月份查閱表)
+    # 月份映射 (過去 12 個月)
     last_12m = divs[divs.index > (datetime.datetime.now() - datetime.timedelta(days=365))]
-    # 轉換為 {月份: 金額} 字典
-    monthly_map = last_12m.groupby(last_12m.index.month).sum().to_dict()
-    
-    return streak, monthly_map
+    m_map = last_12m.groupby(last_12m.index.month).sum().to_dict()
+    return streak, m_map
 
 # --- 主頁面 ---
-st.title("🏆 全球收息 Top 10 與月度歷史紀錄")
+st.title("🏆 全球收息 Top 10 與月度歷史對比")
+st.write("自定義查詢的股票將以 ⭐ 標註並強行出現在首行，不受風險過濾影響。")
 
-CANDIDATES = [
-    "0005.HK", "0011.HK", "0939.HK", "1398.HK", "3988.HK", "0941.HK", "0883.HK", "0003.HK", "0066.HK", 
-    "SCHD", "O", "VICI", "JEPI", "VIG", "VYM", "KO", "PEP", "MO", "T", "PFE", "VZ", "ABBV"
-]
+CANDIDATES = ["0005.HK", "0011.HK", "0939.HK", "1398.HK", "3988.HK", "0941.HK", "0883.HK", "0003.HK", "0066.HK", "SCHD", "O", "VICI", "KO", "PEP", "MO", "T", "PFE", "VZ", "ABBV"]
 
-def fetch_data(symbols):
-    all_data = []
-    progress = st.progress(0, text="數據同步中...")
-    for i, s in enumerate(symbols):
+def fetch_all(symbols, custom_s):
+    all_res = []
+    # 合併清單並去重
+    target_list = list(set(symbols + ([custom_s] if custom_s else [])))
+    
+    prog = st.progress(0, text="正在同步數據...")
+    for i, s in enumerate(target_list):
         try:
             tk = yf.Ticker(s)
             info = tk.info
             if not info or 'currentPrice' not in info: continue
             
-            streak, monthly_map = get_dividend_details(tk)
+            streak, m_map = get_details(tk)
+            net_inc = info.get('netIncomeToCommon', 0)
             
-            # 嚴格過濾邏輯
-            if min_profit_only and info.get('netIncomeToCommon', 0) <= 0: continue
-            if streak < min_growth_years: continue
+            # 過濾邏輯：自定義股票 (custom_s) 永遠不被過濾
+            if s != custom_s:
+                if min_profit_only and net_inc <= 0: continue
+                if streak < min_growth_years: continue
             
             price = info.get('currentPrice')
             div_rate = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0)
             
-            if div_rate > 0:
-                all_data.append({
-                    "代碼": s,
-                    "公司": info.get('shortName', s),
-                    "現價": price,
-                    "股息率": (div_rate / price) if price else 0,
-                    "連續增長": streak,
-                    "monthly_map": monthly_map,
-                    "幣種": info.get('currency', 'USD'),
-                    "obj": tk
-                })
+            all_res.append({
+                "代碼": s,
+                "公司": info.get('shortName', s),
+                "股息率": (div_rate / price) if price > 0 else 0,
+                "連續增長": streak,
+                "m_map": m_map,
+                "is_custom": (s == custom_s),
+                "幣種": info.get('currency', 'USD')
+            })
         except: continue
-        progress.progress((i + 1) / len(symbols))
-    progress.empty()
-    return pd.DataFrame(all_data)
+        prog.progress((i + 1) / len(target_list))
+    prog.empty()
+    return pd.DataFrame(all_res)
 
-# 抓取數據
-raw_df = fetch_data(CANDIDATES)
+df = fetch_all(CANDIDATES, search_symbol)
 
-# 檢查是否有數據，避免 KeyError
-if not raw_df.empty:
-    top_10_df = raw_df.sort_values(by="股息率", ascending=False).head(10)
+if not df.empty:
+    # 排序邏輯：自定義股票排最前，其餘按股息率排序
+    df['sort_key'] = df['is_custom'].apply(lambda x: 0 if x else 1)
+    final_df = df.sort_values(by=['sort_key', '股息率'], ascending=[True, False]).head(12)
 
-    # --- 1. 月份收息歷史表 (核心需求) ---
-    st.subheader("📅 過去 12 個月派息紀錄表 (按月份)")
-    
-    month_cols = [f"{m}月" for m in range(1, 13)]
-    monthly_records = []
-    
-    for _, row in top_10_df.iterrows():
-        m_map = row['monthly_map']
-        m_row = {"代碼": row['代碼']}
+    # --- 1. 月份對比表 ---
+    st.subheader("📅 過去 12 個月派息月份分佈 (含自定義查詢)")
+    m_records = []
+    for _, row in final_df.iterrows():
+        m_row = {"代碼": ("⭐ " + row['代碼'] if row['is_custom'] else row['代碼'])}
         for m in range(1, 13):
-            val = m_map.get(m, 0)
-            m_row[f"{m}月"] = f"{val:.2f}" if val > 0 else "-"
-        monthly_records.append(m_row)
+            val = row['m_map'].get(m, 0)
+            m_row[f"{m}月"] = round(val, 2) if val > 0 else "-"
+        m_records.append(m_row)
     
-    st.table(pd.DataFrame(monthly_records).set_index("代碼"))
+    table_df = pd.DataFrame(m_records).set_index("代碼")
+    st.table(table_df)
 
-    # --- 2. 數據對比總覽 ---
-    st.subheader("📊 穩健高息排名總覽")
-    display_df = top_10_df.copy()
-    display_df['股息率'] = display_df['股息率'].apply(lambda x: f"{x*100:.2f}%")
-    st.dataframe(display_df[["代碼", "公司", "現價", "股息率", "連續增長", "幣種"]], use_container_width=True)
-
-    # --- 3. 個股風險診斷 ---
+    # --- 2. 數據導出功能 ---
     st.divider()
-    tabs = st.tabs([f"{r['代碼']}" for _, r in top_10_df.iterrows()])
-    for i, (idx, res) in enumerate(top_10_df.iterrows()):
-        with tabs[i]:
-            c1, c2 = st.columns(2)
-            with c1:
-                st.write(f"### {res['公司']} ({res['代碼']})")
-                st.write(f"🛡️ **連續增長紀錄：** {res['連續增長']} 年")
-                st.line_chart(res['obj'].dividends)
-            with c2:
-                st.write("🔧 **操作與查證**")
-                if ".HK" in res['代碼']:
-                    st.link_button("🔍 披露易：查看官方公告", f"https://www.hkexnews.hk/sdsearch/searchcas_c.aspx?stockcode={res['代碼'].replace('.HK','').zfill(5)}")
-                else:
-                    st.link_button("🇺🇸 SEC：查看美國官方報告", f"https://www.sec.gov/edgar/browse/?CIK={res['代碼']}")
-                
-                # 手動手數校正
-                lot = st.number_input(f"校正 {res['代碼']} 每手股數:", value=100 if ".HK" in res['代碼'] else 1, key=f"lot_{res['代碼']}")
-                st.metric("一手派息估算", f"{res['obj'].info.get('dividendRate', 0) * lot:.2f} {res['幣種']}")
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        table_df.to_excel(writer, sheet_name='Monthly_Dividends')
+    
+    st.download_button(
+        label="📥 下載月度收息對比表 (Excel)",
+        data=buffer,
+        file_name=f"dividend_report_{datetime.date.today()}.xlsx",
+        mime="application/vnd.ms-excel"
+    )
+
+    # --- 3. 詳細排名表 ---
+    st.subheader("📊 詳細數據總覽")
+    view_df = final_df.copy()
+    view_df['股息率'] = view_df['股息率'].apply(lambda x: f"{x*100:.2f}%")
+    st.dataframe(view_df[["代碼", "公司", "股息率", "連續增長", "幣種"]], use_container_width=True)
 
 else:
-    st.error("🚨 找不到符合條件的股票。請在左側降低『連續增長年數』或取消勾選『僅顯示盈利公司』後重試。")
+    st.error("🚨 找不到符合條件的數據。請調整左側過濾器。")
