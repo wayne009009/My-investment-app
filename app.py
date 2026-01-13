@@ -102,10 +102,27 @@ if not df.empty:
     
     st.table(pd.DataFrame(m_records).set_index("代碼"))
 
-    # --- 2. 下載按鈕 ---
-    buffer = io.BytesIO()
-    pd.DataFrame(m_records).to_excel(buffer, index=False)
-    st.download_button("📥 導出 Excel 紀錄", data=buffer, file_name="dividend_history.xlsx")
+  # --- 2. 下載按鈕 ---
+    st.divider()
+    c1, c2 = st.columns([1, 4])
+    with c1:
+        try:
+            buffer = io.BytesIO()
+            # 指定使用 openpyxl 作為引擎
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                pd.DataFrame(m_records).to_excel(writer, index=False, sheet_name='MonthlyDividends')
+            
+            st.download_button(
+                label="📥 導出 Excel",
+                data=buffer.getvalue(),
+                file_name=f"dividend_report_{datetime.date.today()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        except Exception as e:
+            st.error("匯出功能暫時不可用，請確保已安裝 openpyxl")
+    
+    with c2:
+        st.info("💡 提示：『倒數』為負數表示已過除淨日；⭐ 為你搜尋的指定股票。")
 
     # --- 3. 實時排名與除淨提醒 ---
     st.subheader("📊 實時排名與除淨倒數")
