@@ -4,18 +4,17 @@ import pandas as pd
 import datetime
 import io
 
-st.set_page_config(page_title="全球收息佈局大師", layout="wide")
+st.set_page_config(page_title="全球高息股掃描儀", layout="wide")
 
-# --- 側邊欄：資訊提示 ---
+# --- 側邊欄：搜尋功能 ---
 st.sidebar.header("🔍 股票查詢")
-search_symbol = st.sidebar.text_input("⭐ 輸入代碼強行加入 (例: 0005.HK):", "").strip().upper()
-st.sidebar.info("💡 提示：本版本已取消強制過濾，所有標的均會顯示，請自行留意紅字風險警告。")
+search_symbol = st.sidebar.text_input("⭐ 輸入代碼強行加入對比 (例: 0005.HK):", "").strip().upper()
 
 # --- 核心運算函式 ---
 def get_details(tk_obj):
     divs = tk_obj.dividends
     if divs.empty: return 0, {}
-    # 連續增長計算
+    # 連續增長計算 (過去 10 年)
     yearly = divs.groupby(divs.index.year).sum().sort_index(ascending=False)
     streak = 0
     years = yearly.index.tolist()
@@ -28,14 +27,15 @@ def get_details(tk_obj):
     return streak, m_map
 
 # --- 主頁面 ---
-st.title("🏆 全球收息佈局：月度派息與風險掃描")
+st.title("🏆 全球高息 Top 10 與月度收息表")
 
+# 預設候選名單
 CANDIDATES = ["0005.HK", "0011.HK", "0939.HK", "1398.HK", "3988.HK", "0941.HK", "0883.HK", "0003.HK", "0066.HK", "SCHD", "O", "VICI", "KO", "PEP", "MO", "T", "PFE", "VZ", "ABBV"]
 
-def fetch_all_data(symbols, custom_s):
+def fetch_data(symbols, custom_s):
     all_res = []
     target_list = list(set(symbols + ([custom_s] if custom_s else [])))
-    prog = st.progress(0, text="正在獲取全球數據...")
+    prog = st.progress(0, text="正在獲取最新股息數據...")
     
     for i, s in enumerate(target_list):
         try:
@@ -44,13 +44,19 @@ def fetch_all_data(symbols, custom_s):
             if not info or 'currentPrice' not in info: continue
             
             streak, m_map = get_details(tk)
-            net_inc = info.get('netIncomeToCommon', 0)
             price = info.get('currentPrice')
             div_rate = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0)
             
-            # 風險判定：不再過濾，只做紀錄
-            risk_tag = "正常"
-            if net_inc <= 0: risk_tag = "⚠️ 虧損中"
+            # 獲取除淨日並計算倒數
+            ex_date_str = "N/A"
+            days_to_ex = 999
+            try:
+                cal = tk.calendar
+                if cal is not None and 'Dividend Date' in cal:
+                    ex_date = cal['Dividend Date']
+                    ex_date_str = ex_date.strftime('%Y-%m-%d')
+                    days_to_ex = (ex_date - datetime.datetime.now().date()).days
+            except: pass
             
             all_res.append({
                 "代碼": s,
@@ -58,7 +64,8 @@ def fetch_all_data(symbols, custom_s):
                 "現價": price,
                 "股息率": (div_rate / price) if price > 0 else 0,
                 "連續增長": streak,
-                "狀態": risk_tag,
+                "除淨日": ex_date_str,
+                "倒數(天)": days_to_ex,
                 "m_map": m_map,
                 "is_custom": (s == custom_s),
                 "幣種": info.get('currency', 'USD')
@@ -68,15 +75,15 @@ def fetch_all_data(symbols, custom_s):
     prog.empty()
     return pd.DataFrame(all_res)
 
-df = fetch_all_data(CANDIDATES, search_symbol)
+df = fetch_data(CANDIDATES, search_symbol)
 
 if not df.empty:
-    # 排序：自定義置頂，其餘按股息率
+    # 排序：自定義置頂，其餘按股息率排前 10
     df['sort_key'] = df['is_custom'].apply(lambda x: 0 if x else 1)
-    final_df = df.sort_values(by=['sort_key', '股息率'], ascending=[True, False]).head(15)
+    final_df = df.sort_values(by=['sort_key', '股息率'], ascending=[True, False]).head(11)
 
     # --- 1. 月份對比表 ---
-    st.subheader("📅 過去 12 個月派息金額紀錄 (按月份)")
+    st.subheader("📅 過去 12 個月派息歷史 (按月份)")
     m_records = []
     for _, row in final_df.iterrows():
         prefix = "⭐ " if row['is_custom'] else ""
@@ -86,22 +93,26 @@ if not df.empty:
             m_row[f"{m}月"] = f"{val:.2f}" if val > 0 else "-"
         m_records.append(m_row)
     
-    table_df = pd.DataFrame(m_records).set_index("代碼")
-    st.table(table_df)
+    st.table(pd.DataFrame(m_records).set_index("代碼"))
 
-    # --- 2. 數據導出 ---
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        table_df.to_excel(writer, sheet_name='MonthlyDividends')
-    st.download_button("📥 導出 Excel 紀錄", data=buffer, file_name="dividend_report.xlsx")
+    # --- 2. 下載與總覽 ---
+    st.divider()
+    c1, c2 = st.columns([1, 4])
+    with c1:
+        buffer = io.BytesIO()
+        pd.DataFrame(m_records).to_excel(buffer, index=False)
+        st.download_button("📥 導出 Excel", data=buffer, file_name="dividend_report.xlsx")
+    
+    with c2:
+        st.info("💡 提示：『倒數』為負數表示已過除淨日；⭐ 為你搜尋的指定股票。")
 
-    # --- 3. 詳細風險清單 ---
-    st.subheader("📊 完整對比清單 (含風險標籤)")
+    st.subheader("📊 實時高息排名與除淨提醒")
     view_df = final_df.copy()
     view_df['股息率'] = view_df['股息率'].apply(lambda x: f"{x*100:.2f}%")
     
-    # 使用顏色高亮顯示風險
-    st.dataframe(view_df[["代碼", "公司", "現價", "股息率", "連續增長", "狀態", "幣種"]].reset_index(drop=True), use_container_width=True)
+    # 整理顯示欄位
+    cols = ["代碼", "公司", "現價", "股息率", "除淨日", "倒數(天)", "連續增長", "幣種"]
+    st.dataframe(view_df[cols].reset_index(drop=True), use_container_width=True)
 
 else:
-    st.warning("請在左側輸入正確的股票代碼。")
+    st.error("系統暫時無法獲取數據，請重新整理頁面。")
