@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 import datetime
 
-# --- 1. 專業介面與樣式配置 ---
+# --- 1. 頁面專業美化與樣式 ---
 st.set_page_config(page_title="全球收息終極戰情室 Pro Max", layout="wide")
 
 st.markdown("""
@@ -11,27 +11,32 @@ st.markdown("""
     .main { background-color: #0e1117; }
     div[data-testid="stMetricValue"] { font-size: 24px; color: #00d4ff !important; }
     .stDataFrame { border-radius: 10px; }
-    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
-    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; font-size: 16px; }
+    .instruction-card {
+        background-color: #1e212b;
+        padding: 15px;
+        border-radius: 10px;
+        border-left: 5px solid #00d4ff;
+        margin-bottom: 15px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. 核心數據引擎 (具備 0700.HK 補償機制) ---
+# --- 2. 核心數據引擎 (修復 0700.HK 補償機制) ---
 @st.cache_data(ttl=600)
-def get_mega_analysis(symbol, budget, is_hk=True):
+def get_full_analysis(symbol, budget, is_hk=True):
     try:
         tk = yf.Ticker(symbol)
         info = tk.info
         price = info.get('currentPrice') or info.get('previousClose')
         if not price: return None
 
-        # A. 股息數據補償邏輯 (修復 0700.HK 查無資料)
+        # A. 數據補償：修復抓不到派息數據的問題
         div_rate = info.get('trailingAnnualDividendRate') or info.get('dividendRate') or 0
         today = datetime.date.today()
-        # 抓取 1.5 年確保 0700.HK 年配息能被抓到
+        # 追蹤 500 天確保能抓到年配息
         div_history = tk.dividends[tk.dividends.index.date >= (today - datetime.timedelta(days=500))]
         
-        # B. 派息月份 (💰) 與 發錢倒數 (🔥)
+        # B. 派息月份 (💰) 與 倒數 (🔥)
         months = sorted(list(set(div_history.index.month))) if not div_history.empty else []
         countdown = "確認中"
         if not div_history.empty:
@@ -40,34 +45,34 @@ def get_mega_analysis(symbol, budget, is_hk=True):
             diff = (est_next - today).days
             countdown = f"🔥 {diff}天" if 0 < diff <= 30 else f"{diff}天" if diff > 0 else "已過除淨"
 
-        # C. 匯率與一手成本 (HKD 轉換)
+        # C. 預算策略與一手成本
         exch = 1.0 if is_hk else 7.8
         lot_map = {"0005.HK": 400, "0941.HK": 500, "0883.HK": 1000, "0939.HK": 1000, 
                    "0700.HK": 100, "1398.HK": 1000, "3988.HK": 1000, "0011.HK": 100, "0823.HK": 100}
         lot_size = lot_map.get(symbol, 100) if is_hk else 1
         one_lot_hkd = price * exch * lot_size
         
-        # D. 5萬預算策略
+        # D. 實戰配單邏輯
         if budget >= one_lot_hkd:
             lots = int(budget // one_lot_hkd)
             strategy = f"✅ 買 {lots} 手"
             rem_cash = budget - (lots * one_lot_hkd)
-            annual_inc = div_rate * exch * lots * lot_size
+            annual_inc = div_rate * exch * (lots * lot_size)
         else:
             strategy = f"❌ 缺 ${int(one_lot_hkd - budget)}"
             rem_cash = budget
             annual_inc = 0
 
-        # E. 安全指標與估值
+        # E. 安全與估值指標
         avg_y = info.get('fiveYearAvgDividendYield', 0) / 100.0
         val = "💎 特價" if avg_y > 0 and price <= (div_rate / (avg_y * 1.05)) else "⚠️ 溢價"
         payout = info.get('payoutRatio', 0)
-        de_ratio = info.get('debtToEquity', 0) / 100.0
+        de_ratio = (info.get('debtToEquity', 0) / 100.0) if info.get('debtToEquity') else 0
         
-        # RSI 時機
+        # F. RSI 計算
         hist = tk.history(period="1mo")
         rsi = 50
-        if len(hist) > 14:
+        if len(hist) > 10:
             delta = hist['Close'].diff()
             gain = delta.where(delta > 0, 0).mean()
             loss = -delta.where(delta < 0, 0).mean()
@@ -77,208 +82,97 @@ def get_mega_analysis(symbol, budget, is_hk=True):
             "代碼": symbol, "公司": info.get('shortName', symbol), "策略": strategy,
             "估值": val, "倒數": countdown, "股息率%": round((div_rate/price)*100, 2),
             "一手成本": one_lot_hkd, "預計年息": annual_inc, "剩餘現金": rem_cash,
-            "RSI": rsi, "Payout%": payout*100, "D/E": de_ratio, "months": months, "history": div_history
+            "RSI": rsi, "Payout%": payout*100, "D/E": de_ratio, "months": months, "history": div_history,
+            "raw_div": div_rate, "lot_size": lot_size
         }
     except: return None
 
-# --- 3. UI 介面佈局 ---
-st.title("🛡️ 全球收息終極戰情室 Pro Max")
-
+# --- 3. 側邊欄 ---
 with st.sidebar:
-    st.header("💰 實戰預算設定")
-    budget = st.number_input("HKD 本金:", value=50000, step=5000)
+    st.header("💰 實戰配置設定")
+    # 使用 unique key 避免 DuplicateElementId
+    budget = st.number_input("您的總本金 (HKD):", value=50000, step=5000, key="budget_input")
     st.divider()
-    with st.expander("📚 指標定義"):
-        st.write("💎 特價: 現價低於歷史平均")
-        st.write("🔥 倒數: 距離下次派息預估天數")
-        st.write("💰 表: 該股在這些月份會發錢")
-    if st.button("🔄 全盤數據刷新"):
+    if st.button("🔄 全盤數據重整", key="refresh_all"):
         st.cache_data.clear()
         st.rerun()
+
+# --- 4. 主界面與 Tabs ---
+st.title("🛡️ 全球收息終極戰情室 Pro Max")
 
 HK_LIST = ["0005.HK", "0941.HK", "0883.HK", "0939.HK", "0700.HK", "1398.HK", "3988.HK", "0011.HK", "0823.HK"]
 US_LIST = ["SCHD", "VYM", "O", "MO", "KO", "T"]
 
-t1, t2 = st.tabs(["🇭🇰 港股核心 (一手門檻)", "🇺🇸 美股配置 (靈活買入)"])
+t1, t2 = st.tabs(["🇭🇰 港股戰區", "🇺🇸 美股戰區"])
 
 for tab, stocks, is_hk in zip([t1, t2], [HK_LIST, US_LIST], [True, False]):
     with tab:
-        res_list = []
-        for s in stocks:
-            data = get_mega_analysis(s, budget, is_hk)
-            if data: res_list.append(data)
+        res_list = [get_full_analysis(s, budget, is_hk) for s in stocks if get_full_analysis(s, budget, is_hk)]
         
         if res_list:
             df = pd.DataFrame(res_list)
-            
-            # 頂部戰情卡片
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("預計組合年息", f"${df['預計年息'].sum():,.0f} HKD")
-            c2.metric("平均股息率", f"{df['股息率%'].mean():.2f}%")
-            c3.metric("最低剩餘現金", f"${df['剩餘現金'].min():,.0f}")
-            c4.metric("監控總數", f"{len(df)} 隻")
 
-            # 1. 12個月派息表 (💰)
-            st.subheader("🗓️ 全年派息月份分佈 (💰)")
-            m_rows = []
-            for _, r in df.iterrows():
-                row = [r['公司']] + [("💰" if i in r['months'] else "") for i in range(1, 13)]
-                m_rows.append(row)
-            st.table(pd.DataFrame(m_rows, columns=["公司"] + [f"{i}月" for i in range(1, 13)]))
+            # --- 💡 智能組合教學模式 ---
+            st.subheader("🤖 組合操作建議 (具體買入順序)")
+            # 優先選特價股並按倒數天數排列
+            teaching_df = df[df['估值'] == "💎 特價"].sort_values('倒數')
+            if teaching_df.empty: teaching_df = df.sort_values('倒數')
 
-            # 2. 綜合實戰大表
-            st.subheader("📊 5萬預算全維度分析")
+            temp_budget = budget
+            portfolio = []
+            cols = st.columns(3)
+            for i, (_, row) in enumerate(teaching_df.iterrows()):
+                if temp_budget >= row['一手成本'] and len(portfolio) < 3:
+                    portfolio.append(row)
+                    temp_budget -= row['一手成本']
+                    with cols[len(portfolio)-1]:
+                        st.markdown(f"""
+                        <div class="instruction-card">
+                        <b>第 {len(portfolio)} 步買入：{row['代碼']}</b><br>
+                        支出：${row['一手成本']:,.0f}<br>
+                        目標：{row['months']} 月收息<br>
+                        狀態：{row['估值']} / {row['倒數']}
+                        </div>
+                        """, unsafe_allow_html=True)
+
+            # 關鍵指標卡
+            total_inc = sum([p['預計年息'] for p in portfolio])
+            m1, m2, m3 = st.columns(3)
+            m1.metric("預計組合年息", f"${total_inc:,.0f} HKD")
+            m2.metric("剩餘備用金", f"${temp_budget:,.0f} HKD")
+            m3.metric("組合收益率", f"{(total_inc/budget)*100:.2f}%")
+
+            # 1. 12個月派息表
+            st.subheader("🗓️ 全年派息月份預測 (💰)")
+            m_rows = [[r['公司']] + [("💰" if m in r['months'] else "") for m in range(1, 13)] for r in res_list]
+            st.table(pd.DataFrame(m_rows, columns=["公司"] + [f"{m}月" for m in range(1, 13)]))
+
+            # 2. 實戰數據大表
+            st.subheader("📊 全維度市場數據掃描")
             st.dataframe(
                 df[["代碼", "公司", "策略", "估值", "倒數", "股息率%", "一手成本", "預計年息", "RSI", "Payout%", "D/E"]],
                 column_config={
                     "股息率%": st.column_config.NumberColumn("股息率", format="%.2f%%"),
-                    "一手成本": st.column_config.NumberColumn("一手成本(HKD)", format="$%d"),
-                    "預計年息": st.column_config.NumberColumn("年收息", format="$%d"),
-                    "RSI": st.column_config.ProgressColumn("時機(RSI)", min_value=0, max_value=100, format="%.0f"),
-                    "Payout%": st.column_config.NumberColumn("派息比", format="%.0f%%"),
+                    "RSI": st.column_config.ProgressColumn("買入時機(RSI)", min_value=0, max_value=100, format="%.0f"),
+                    "一手成本": st.column_config.NumberColumn("成本", format="$%d"),
                 },
                 use_container_width=True, hide_index=True
             )
 
-# --- 4. 歷史溯源與個股檢查 ---
+# --- 5. 個股深度溯源 (含 0700.HK) ---
 st.divider()
-st.subheader("🔍 個股深度溯源 (填息能力檢查)")
-search = st.text_input("輸入代碼 (例: 0700.HK):").strip().upper()
+st.subheader("🔍 個股深度溯源 (填息與歷史檢查)")
+search = st.text_input("輸入代碼 (例: 0700.HK):", key="search_box").strip().upper()
 if search:
-    res = get_mega_analysis(search, budget, (".HK" in search))
+    res = get_full_analysis(search, budget, (".HK" in search))
     if res:
-        col_a, col_b = st.columns([1, 2])
-        with col_a:
+        ca, cb = st.columns([1, 2])
+        with ca:
             st.write(f"### {res['公司']} ({search})")
-            st.write(f"**實戰建議：** {res['策略']}")
-            st.write(f"**估值狀態：** {res['估值']}")
+            st.write(f"**實戰策略：** {res['策略']}")
             st.write(f"**安全指標：** Payout {res['Payout%']:.0f}% / D/E {res['D/E']:.2f}")
-        with col_b:
-            st.write("#### 📅 1年內派息歷史紀錄")
+        with cb:
+            st.write("#### 📅 1.5 年內派息紀錄")
             st.write(res['history'].sort_index(ascending=False))
     else:
-        st.error("查無資料，請確認代碼正確")
-
-
-import streamlit as st
-import yfinance as yf
-import pandas as pd
-import datetime
-
-# --- 1. 介面配置 ---
-st.set_page_config(page_title="收息戰情室 Pro - 實戰教學版", layout="wide")
-
-# --- 2. 核心數據引擎 (含補償與分析) ---
-@st.cache_data(ttl=600)
-def get_analysis_data(symbol, budget):
-    try:
-        tk = yf.Ticker(symbol)
-        info = tk.info
-        price = info.get('currentPrice') or info.get('previousClose')
-        if not price: return None
-
-        # 數據補償
-        div_rate = info.get('trailingAnnualDividendRate') or info.get('dividendRate') or 0
-        today = datetime.date.today()
-        div_history = tk.dividends[tk.dividends.index.date >= (today - datetime.timedelta(days=400))]
-        
-        # 核心計算
-        lot_map = {"0005.HK": 400, "0941.HK": 500, "0883.HK": 1000, "0939.HK": 1000, 
-                   "0700.HK": 100, "1398.HK": 1000, "3988.HK": 1000, "0011.HK": 100, "0823.HK": 100}
-        lot_size = lot_map.get(symbol, 100)
-        cost_per_lot = price * lot_size
-        
-        # 除淨倒數計算
-        days_to_ex = 999
-        if not div_history.empty:
-            last_ex = div_history.index[-1].date()
-            est_next = last_ex + datetime.timedelta(days=365)
-            days_to_ex = (est_next - today).days
-
-        return {
-            "代碼": symbol,
-            "公司": info.get('shortName', symbol),
-            "現價": price,
-            "一手成本": cost_per_lot,
-            "股息率%": round((div_rate/price)*100, 2),
-            "倒數天數": days_to_ex,
-            "估值": "💎 特價" if (info.get('fiveYearAvgDividendYield', 0)/100.0) > 0 and price <= (div_rate / ((info.get('fiveYearAvgDividendYield', 0)/100.0) * 1.05)) else "⚠️ 溢價",
-            "months": sorted(list(set(div_history.index.month))),
-            "div_rate": div_rate,
-            "lot_size": lot_size
-        }
-    except: return None
-
-# --- 3. UI 佈局 ---
-st.title("🛡️ 收息戰情室：最強組合建議與操作教學")
-
-with st.sidebar:
-    st.header("💰 配置預算")
-    budget = st.number_input("HKD 本金:", value=50000, step=5000)
-    st.info("教學模式：系統將根據您的預算自動優化買入順序。")
-
-STOCKS = ["0005.HK", "0941.HK", "0883.HK", "0939.HK", "0700.HK", "1398.HK", "3988.HK", "0011.HK", "0823.HK"]
-
-with st.spinner("🔍 正在掃描全港高息股並規劃最佳路徑..."):
-    all_data = []
-    for s in STOCKS:
-        d = get_analysis_data(s, budget)
-        if d: all_data.append(d)
-
-if all_data:
-    df = pd.DataFrame(all_data)
-
-    # --- 💡 新增：智能組合教學模組 ---
-    st.subheader("🤖 5 萬元本金「最強收息」組合操作建議")
-    
-    # 邏輯：優先選「特價股」，再按「倒數天數」排序
-    suggested_df = df[df['估值'] == "💎 特價"].sort_values('倒數天數')
-    if suggested_df.empty: suggested_df = df.sort_values('倒數天數')
-
-    current_budget = budget
-    portfolio = []
-    
-    col_steps = st.columns(len(suggested_df[:3])) # 顯示前三個最佳步驟
-    
-    for i, (_, row) in enumerate(suggested_df.iterrows()):
-        if current_budget >= row['一手成本']:
-            lots = 1 # 為了組合多樣性，教學模式預設每隻買1手
-            current_budget -= row['一手成本'] * lots
-            portfolio.append(row)
-            
-            if i < 3: # 僅展示前三步教學
-                with col_steps[i]:
-                    st.success(f"**第 {i+1} 步：買入 {row['代碼']}**")
-                    st.write(f"🏢 {row['公司']}")
-                    st.write(f"📅 預計除淨倒數：{row['倒數天數']} 天")
-                    st.write(f"💰 支出：${row['一手成本']:,.0f}")
-                    st.caption(f"目標：卡位 {row['months']} 月的派息")
-
-    # --- 顯示組合總覽 ---
-    st.divider()
-    res_c1, res_c2, res_c3 = st.columns(3)
-    total_est_income = sum([p['div_rate'] * p['lot_size'] for p in portfolio])
-    res_c1.metric("組合總預計年息", f"${total_est_income:,.0f} HKD")
-    res_c2.metric("剩餘預算 (現金)", f"${current_budget:,.0f} HKD")
-    res_c3.metric("組合股息率", f"{(total_est_income/budget)*100:.2f}%")
-
-    # --- 1-12月派息預測 ---
-    st.subheader("🗓️ 您組合的派息時間線")
-    p_names = [p['公司'] for p in portfolio]
-    p_months = [p['months'] for p in portfolio]
-    m_table = []
-    for name, months in zip(p_names, p_months):
-        m_table.append([name] + [("💰" if m in months else "") for m in range(1, 13)])
-    st.table(pd.DataFrame(m_table, columns=["公司"] + [f"{i}月" for i in range(1, 13)]))
-
-    # --- 全功能表格保留 ---
-    st.subheader("📊 所有監控個股全數據")
-    st.dataframe(df.drop(columns=['div_rate', 'lot_size']), use_container_width=True, hide_index=True)
-
-st.markdown("""
----
-### 📖 如何具體操作做到月月收息？
-1. **時間差買入**：根據「第 1 步」到「第 3 步」的順序買入。優先買入「倒數天數」最接近的股票。
-2. **持有至除淨**：買入後不要頻繁買賣，必須持有過「除淨日」。
-3. **資金回籠**：收到的股息可以累積，當剩餘預算加上股息又夠買「一手」時，再投入下一隻💎特價股。
-""")
+        st.error("查無資料，請檢查代碼或稍後再試。")
