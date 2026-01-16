@@ -5,129 +5,123 @@ import datetime
 
 st.set_page_config(page_title="全球收息終極戰情室", layout="wide")
 
-# --- 1. 核心邏輯：派息月份、除淨日與倒數 ---
-def get_div_analysis(symbol, divs):
-    if divs.empty:
-        return [], "N/A", 999
-    
-    # 預測月份
-    months = sorted(list(set(divs.index.month[-4:])))
-    
-    # 計算倒數 (邏輯：參考去年同期的除淨日)
-    today = datetime.date.today()
-    try:
-        # 尋找去年此時之後最接近的派息紀錄
-        last_year_date = today - datetime.timedelta(days=350)
-        past_divs = divs[divs.index.date >= last_year_date]
-        
-        if not past_divs.empty:
-            # 預測下一次：去年日期 + 365天
-            est_next_date = past_divs.index[0].date() + datetime.timedelta(days=365)
-            countdown = (est_next_date - today).days
-            return months, est_next_date.strftime('%Y-%m-%d'), countdown
-    except:
-        pass
-    return months, "確認中", 999
-
-# --- 2. 核心數據掃描器 ---
-def scan_stock(symbol, budget, is_hk=True):
+# --- 1. 核心數據引擎 (優化速度，減少崩潰) ---
+@st.cache_data(ttl=3600) # 快取一小時，避免重複請求導致封鎖
+def fetch_stock_basic(symbol):
     try:
         tk = yf.Ticker(symbol)
-        # 使用 fast_info 避免系統崩潰
-        price = tk.fast_info.get('last_price')
-        if price is None or price <= 0: return None
+        # 僅抓取最核心數據
+        fast = tk.fast_info
+        price = fast.get('last_price')
+        if not price: return None
         
         info = tk.info
         divs = tk.dividends
-        div_rate = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
         
-        # 港股一手股數定義
-        lot_map = {"0005.HK": 400, "0941.HK": 500, "0883.HK": 1000, "0939.HK": 1000, "0700.HK": 100, 
-                   "1398.HK": 1000, "3988.HK": 1000, "0011.HK": 100, "0003.HK": 1000, "0823.HK": 100}
-        lot_size = lot_map.get(symbol, 100) if is_hk else 1
-        
-        # 成本與預算 (5萬元實戰)
-        one_lot_hkd = price * lot_size
-        if budget >= one_lot_hkd:
-            max_lots = int(budget // one_lot_hkd)
-            strategy = f"✅ 買 {max_lots} 手"
-            rem_cash = budget - (max_lots * one_lot_hkd)
-            est_income = (div_rate) * (max_lots * lot_size)
-        else:
-            strategy = f"❌ 缺 ${one_lot_hkd - budget:,.0f}"
-            rem_cash = budget
-            est_income = 0
-            
-        # 派息分析
-        months, next_ex_date, countdown = get_div_analysis(symbol, divs)
-        
-        # 倒數警告標籤
-        if countdown < 0: countdown_label = "已過期"
-        elif countdown <= 21: countdown_label = f"🔥 僅剩 {countdown}天"
-        else: countdown_label = f"{countdown}天"
-
-        # 估值 (💎特價判斷)
-        avg_yield = info.get('fiveYearAvgDividendYield', 0) / 100.0
-        target_price = div_rate / (avg_yield * 1.05) if avg_yield > 0 else 0
-        val_status = "💎 特價" if target_price > 0 and price <= target_price else "⚠️ 溢價"
-
-        return {
-            "代碼": symbol,
-            "公司": info.get('shortName', symbol),
-            "估值": val_status,
-            "除淨倒數": countdown_label,
-            "實戰策略": strategy,
-            "一手成本": f"${one_lot_hkd:,.0f}",
-            "剩餘現金": f"${rem_cash:,.0f}",
-            "預計年息": f"${est_income:,.0f}",
-            "股息率%": round((div_rate/price)*100, 2),
-            "預估下回": next_ex_date,
-            "months": months
-        }
+        return {"price": price, "info": info, "divs": divs}
     except: return None
 
-# --- UI 介面 ---
-st.title("🛡️ 全球收息終極戰情室 (全功能修復版)")
+def get_analysis(symbol, budget, is_hk=True):
+    data = fetch_stock_basic(symbol)
+    if not data: return None
+    
+    price = data['price']
+    info = data['info']
+    divs = data['divs']
+    
+    # A. 基礎股息
+    div_rate = info.get('trailingAnnualDividendRate', 0) or info.get('dividendRate', 0) or 0
+    yield_pct = (div_rate / price) * 100 if price > 0 else 0
+    
+    # B. 5萬實戰策略 (保留功能)
+    lot_map = {"0005.HK": 400, "0941.HK": 500, "0883.HK": 1000, "0939.HK": 1000, 
+               "0700.HK": 100, "1398.HK": 1000, "3988.HK": 1000, "0011.HK": 100, "0823.HK": 100}
+    lot_size = lot_map.get(symbol, 100) if is_hk else 1
+    cost_per_lot = price * lot_size
+    
+    if budget >= cost_per_lot:
+        lots = int(budget // cost_per_lot)
+        strategy = f"✅ 買 {lots} 手"
+        income = div_rate * lots * lot_size
+        rem_cash = budget - (lots * cost_per_lot)
+    else:
+        strategy = f"❌ 缺 ${cost_per_lot - budget:,.0f}"
+        income = 0
+        rem_cash = budget
+
+    # C. 派息月份與倒數 (保留功能)
+    months = sorted(list(set(divs.index.month[-4:]))) if not divs.empty else []
+    countdown_str = "查詢中"
+    if not divs.empty:
+        today = datetime.date.today()
+        # 預測邏輯：去年同期日期 + 365
+        last_year = today - datetime.timedelta(days=365)
+        recent_divs = divs[divs.index.date >= last_year]
+        if not recent_divs.empty:
+            est_next = recent_divs.index[0].date() + datetime.timedelta(days=365)
+            diff = (est_next - today).days
+            countdown_str = f"🔥 {diff}天" if 0 < diff <= 21 else f"{diff}天" if diff > 0 else "已過除淨"
+
+    # D. 估值狀態 (保留功能)
+    avg_y = info.get('fiveYearAvgDividendYield', 0) / 100.0
+    val = "💎 特價" if avg_y > 0 and price <= (div_rate / (avg_y * 1.05)) else "⚠️ 溢價"
+
+    return {
+        "代碼": symbol,
+        "公司": info.get('shortName', symbol),
+        "策略": strategy,
+        "估值": val,
+        "倒數": countdown_str,
+        "股息率%": round(yield_pct, 2),
+        "一手成本": f"${cost_per_lot:,.0f}",
+        "剩餘現金": f"${rem_cash:,.0f}",
+        "年息預期": f"${income:,.0f}",
+        "months": months
+    }
+
+# --- 2. UI 界面 ---
+st.title("🛡️ 收息終極戰情室 (全功能修復版)")
 
 with st.sidebar:
-    st.header("💰 實戰預算")
-    budget = st.number_input("本金 (HKD):", value=50000)
-    st.divider()
-    st.write("**💎 特價**：現價 < 目標價 (5年平均)")
-    st.write("**🔥 倒數**：21天內除淨，請儘速決策")
+    st.header("💰 設定")
+    user_budget = st.number_input("本金 (HKD):", value=50000)
+    if st.button("🔄 清除快取並刷新"):
+        st.cache_data.clear()
+        st.rerun()
 
-STOCKS = ["0005.HK", "0941.HK", "0883.HK", "0939.HK", "0700.HK", "1398.HK", "3988.HK", "0011.HK", "0003.HK", "0823.HK"]
+STOCKS = ["0005.HK", "0941.HK", "0883.HK", "0939.HK", "0700.HK", "1398.HK", "3988.HK", "0011.HK", "0823.HK"]
 
-if st.button("🚀 執行全方位掃描 (恢復所有功能)"):
-    results = []
-    bar = st.progress(0)
-    for i, s in enumerate(STOCKS):
-        data = scan_stock(s, budget)
-        if data: results.append(data)
-        bar.progress((i+1)/len(STOCKS))
+# 執行掃描
+results = []
+for s in STOCKS:
+    res = get_analysis(s, user_budget)
+    if res: results.append(res)
+
+if results:
+    df = pd.DataFrame(results)
     
-    if results:
-        df = pd.DataFrame(results)
-        
-        # 1. 1-12月月份表
-        st.subheader("🗓️ 1-12月 派息預期表")
-        m_rows = []
-        for _, r in df.iterrows():
-            m_data = [""] * 12
-            for m in r['months']: m_data[m-1] = "💰"
-            m_rows.append([r['公司']] + m_data)
-        st.table(pd.DataFrame(m_rows, columns=["公司"] + [f"{i}月" for i in range(1, 13)]))
+    # 功能 1: 1-12月月份表 (💰)
+    st.subheader("🗓️ 1-12月 派息月份表")
+    m_data = []
+    for _, r in df.iterrows():
+        row = [r['公司']] + [("💰" if i in r['months'] else "") for i in range(1, 13)]
+        m_data.append(row)
+    st.table(pd.DataFrame(m_data, columns=["公司"] + [f"{i}月" for i in range(1, 13)]))
 
-        # 2. 實戰清單 (包含所有重要指標)
-        st.subheader("📊 實戰策略分析清單")
-        st.dataframe(df.drop(columns=["months"]), use_container_width=True, hide_index=True)
+    # 功能 2: 綜合分析表 (倒數、策略、成本、估值)
+    st.subheader("📊 5萬預算實戰分析")
+    st.dataframe(df.drop(columns=["months"]), use_container_width=True, hide_index=True)
+else:
+    st.warning("⚠️ 數據加載中或伺服器忙碌，請點擊左側『刷新』按鈕。")
 
 st.divider()
-st.subheader("🔍 個股深度溯源 (含 0700.HK)")
+
+# 功能 3: 深度溯源 (解決 0700.HK 顯示問題)
+st.subheader("🔍 個股深度溯源")
 search = st.text_input("輸入代碼 (例: 0700.HK):").strip().upper()
 if search:
-    tk = yf.Ticker(search)
-    try:
-        st.write(f"### {search} 歷史派息紀錄")
-        st.write(tk.dividends.tail(10).sort_index(ascending=False))
-    except: st.error("查無紀錄")
+    data = fetch_stock_basic(search)
+    if data:
+        st.write(f"### {search} 近期派息歷史")
+        st.write(data['divs'].tail(10).sort_index(ascending=False))
+    else: st.error("查無資料，請確認代碼包含 .HK")
