@@ -158,3 +158,127 @@ if search:
             st.write(res['history'].sort_index(ascending=False))
     else:
         st.error("查無資料，請確認代碼正確")
+
+
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import datetime
+
+# --- 1. 介面配置 ---
+st.set_page_config(page_title="收息戰情室 Pro - 實戰教學版", layout="wide")
+
+# --- 2. 核心數據引擎 (含補償與分析) ---
+@st.cache_data(ttl=600)
+def get_analysis_data(symbol, budget):
+    try:
+        tk = yf.Ticker(symbol)
+        info = tk.info
+        price = info.get('currentPrice') or info.get('previousClose')
+        if not price: return None
+
+        # 數據補償
+        div_rate = info.get('trailingAnnualDividendRate') or info.get('dividendRate') or 0
+        today = datetime.date.today()
+        div_history = tk.dividends[tk.dividends.index.date >= (today - datetime.timedelta(days=400))]
+        
+        # 核心計算
+        lot_map = {"0005.HK": 400, "0941.HK": 500, "0883.HK": 1000, "0939.HK": 1000, 
+                   "0700.HK": 100, "1398.HK": 1000, "3988.HK": 1000, "0011.HK": 100, "0823.HK": 100}
+        lot_size = lot_map.get(symbol, 100)
+        cost_per_lot = price * lot_size
+        
+        # 除淨倒數計算
+        days_to_ex = 999
+        if not div_history.empty:
+            last_ex = div_history.index[-1].date()
+            est_next = last_ex + datetime.timedelta(days=365)
+            days_to_ex = (est_next - today).days
+
+        return {
+            "代碼": symbol,
+            "公司": info.get('shortName', symbol),
+            "現價": price,
+            "一手成本": cost_per_lot,
+            "股息率%": round((div_rate/price)*100, 2),
+            "倒數天數": days_to_ex,
+            "估值": "💎 特價" if (info.get('fiveYearAvgDividendYield', 0)/100.0) > 0 and price <= (div_rate / ((info.get('fiveYearAvgDividendYield', 0)/100.0) * 1.05)) else "⚠️ 溢價",
+            "months": sorted(list(set(div_history.index.month))),
+            "div_rate": div_rate,
+            "lot_size": lot_size
+        }
+    except: return None
+
+# --- 3. UI 佈局 ---
+st.title("🛡️ 收息戰情室：最強組合建議與操作教學")
+
+with st.sidebar:
+    st.header("💰 配置預算")
+    budget = st.number_input("HKD 本金:", value=50000, step=5000)
+    st.info("教學模式：系統將根據您的預算自動優化買入順序。")
+
+STOCKS = ["0005.HK", "0941.HK", "0883.HK", "0939.HK", "0700.HK", "1398.HK", "3988.HK", "0011.HK", "0823.HK"]
+
+with st.spinner("🔍 正在掃描全港高息股並規劃最佳路徑..."):
+    all_data = []
+    for s in STOCKS:
+        d = get_analysis_data(s, budget)
+        if d: all_data.append(d)
+
+if all_data:
+    df = pd.DataFrame(all_data)
+
+    # --- 💡 新增：智能組合教學模組 ---
+    st.subheader("🤖 5 萬元本金「最強收息」組合操作建議")
+    
+    # 邏輯：優先選「特價股」，再按「倒數天數」排序
+    suggested_df = df[df['估值'] == "💎 特價"].sort_values('倒數天數')
+    if suggested_df.empty: suggested_df = df.sort_values('倒數天數')
+
+    current_budget = budget
+    portfolio = []
+    
+    col_steps = st.columns(len(suggested_df[:3])) # 顯示前三個最佳步驟
+    
+    for i, (_, row) in enumerate(suggested_df.iterrows()):
+        if current_budget >= row['一手成本']:
+            lots = 1 # 為了組合多樣性，教學模式預設每隻買1手
+            current_budget -= row['一手成本'] * lots
+            portfolio.append(row)
+            
+            if i < 3: # 僅展示前三步教學
+                with col_steps[i]:
+                    st.success(f"**第 {i+1} 步：買入 {row['代碼']}**")
+                    st.write(f"🏢 {row['公司']}")
+                    st.write(f"📅 預計除淨倒數：{row['倒數天數']} 天")
+                    st.write(f"💰 支出：${row['一手成本']:,.0f}")
+                    st.caption(f"目標：卡位 {row['months']} 月的派息")
+
+    # --- 顯示組合總覽 ---
+    st.divider()
+    res_c1, res_c2, res_c3 = st.columns(3)
+    total_est_income = sum([p['div_rate'] * p['lot_size'] for p in portfolio])
+    res_c1.metric("組合總預計年息", f"${total_est_income:,.0f} HKD")
+    res_c2.metric("剩餘預算 (現金)", f"${current_budget:,.0f} HKD")
+    res_c3.metric("組合股息率", f"{(total_est_income/budget)*100:.2f}%")
+
+    # --- 1-12月派息預測 ---
+    st.subheader("🗓️ 您組合的派息時間線")
+    p_names = [p['公司'] for p in portfolio]
+    p_months = [p['months'] for p in portfolio]
+    m_table = []
+    for name, months in zip(p_names, p_months):
+        m_table.append([name] + [("💰" if m in months else "") for m in range(1, 13)])
+    st.table(pd.DataFrame(m_table, columns=["公司"] + [f"{i}月" for i in range(1, 13)]))
+
+    # --- 全功能表格保留 ---
+    st.subheader("📊 所有監控個股全數據")
+    st.dataframe(df.drop(columns=['div_rate', 'lot_size']), use_container_width=True, hide_index=True)
+
+st.markdown("""
+---
+### 📖 如何具體操作做到月月收息？
+1. **時間差買入**：根據「第 1 步」到「第 3 步」的順序買入。優先買入「倒數天數」最接近的股票。
+2. **持有至除淨**：買入後不要頻繁買賣，必須持有過「除淨日」。
+3. **資金回籠**：收到的股息可以累積，當剩餘預算加上股息又夠買「一手」時，再投入下一隻💎特價股。
+""")
